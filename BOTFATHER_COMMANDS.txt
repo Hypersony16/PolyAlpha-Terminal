@@ -1,0 +1,19 @@
+start - Open BTC command center
+btc - Show BTC 15m signal
+market - Show live BTC 15m market
+strategy - Show advanced strategy lab
+stats - Show prediction accuracy and paper stats
+paper_auto - Open automatic paper trading
+paper_start - Start automatic paper trading
+paper_stop - Stop automatic paper trading
+paper_reset - Reset paper balance to 100 dollars
+wallet_add - Add tracked wallet
+wallet_remove - Remove tracked wallet
+wallet_name - Rename tracked wallet
+wallet_list - Show tracked wallets
+own_wallet - Set your own wallet
+alerts_on - Enable alerts
+alerts_off - Disable alerts
+set_edge - Set minimum edge threshold
+settings - Open settings
+admin - Open admin dashboard
