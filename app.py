@@ -54,7 +54,7 @@ def main():
         app.job_queue.run_repeating(wallet_job, interval=60, first=15)
         app.job_queue.run_repeating(wallet_trades_job, interval=4, first=5)
         app.job_queue.run_repeating(live_dashboard_job, interval=4, first=8)
-        app.job_queue.run_repeating(paper_auto_job, interval=2, first=7)
+  app.job_queue.run_repeating(paper_auto_job, interval=5, first=7)
         app.job_queue.run_daily(daily_summary_job, time=time(hour=21, minute=0, second=0, tzinfo=BERLIN_TZ))
 
     app.run_polling(drop_pending_updates=True)
