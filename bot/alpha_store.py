@@ -1,0 +1,221 @@
+"""SQLite persistence for PolyAlpha Terminal.
+Keeps existing PolyScalpBot tables intact and only adds alpha_* tables.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from bot.db import get_conn
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_alpha_tables() -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alpha_wallets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet TEXT NOT NULL UNIQUE,
+            label TEXT,
+            notes TEXT,
+            score REAL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alpha_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_scores (
+            wallet TEXT PRIMARY KEY,
+            label TEXT,
+            score REAL,
+            roi REAL,
+            pnl REAL,
+            volume REAL,
+            trades INTEGER,
+            winrate REAL,
+            open_value REAL,
+            consistency REAL,
+            recent_score REAL,
+            drawdown REAL,
+            last_scanned TEXT,
+            raw_json TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet TEXT NOT NULL,
+            market TEXT NOT NULL,
+            title TEXT,
+            outcome TEXT,
+            size REAL,
+            value REAL,
+            avg_price REAL,
+            current_price REAL,
+            token_id TEXT,
+            condition_id TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            UNIQUE(wallet, market, outcome, token_id)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS consensus_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            title TEXT,
+            outcome TEXT,
+            score REAL,
+            wallets INTEGER,
+            total_value REAL,
+            avg_wallet_score REAL,
+            avg_price REAL,
+            fair_value REAL,
+            edge REAL,
+            confidence TEXT,
+            best_wallets TEXT,
+            token_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS whale_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet TEXT NOT NULL,
+            market TEXT NOT NULL,
+            outcome TEXT,
+            value REAL,
+            price REAL,
+            score REAL,
+            created_at TEXT NOT NULL,
+            sent INTEGER DEFAULT 0,
+            UNIQUE(wallet, market, outcome, created_at)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet TEXT NOT NULL,
+            total_value REAL,
+            positions INTEGER,
+            exposure_json TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_rankings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            title TEXT,
+            score REAL,
+            liquidity REAL,
+            volume REAL,
+            wallets INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def add_alpha_wallet(wallet: str, label: str = "", notes: str = "") -> None:
+    ensure_alpha_tables()
+    w = wallet.lower().strip()
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO alpha_wallets(wallet,label,notes,created_at,updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(wallet) DO UPDATE SET label=excluded.label, notes=excluded.notes, updated_at=excluded.updated_at""",
+        (w, label.strip(), notes.strip(), now_iso(), now_iso()),
+    )
+    conn.commit(); conn.close()
+
+
+def remove_alpha_wallet(wallet: str) -> int:
+    ensure_alpha_tables(); conn = get_conn()
+    cur = conn.execute("DELETE FROM alpha_wallets WHERE wallet=?", (wallet.lower().strip(),))
+    conn.commit(); n = cur.rowcount; conn.close(); return n
+
+
+def list_alpha_wallets(limit: int = 500) -> list[tuple[str, str]]:
+    ensure_alpha_tables(); conn = get_conn()
+    rows = conn.execute("SELECT wallet, COALESCE(label,'') FROM alpha_wallets ORDER BY score DESC, id DESC LIMIT ?", (limit,)).fetchall()
+    conn.close(); return [(r[0], r[1]) for r in rows]
+
+
+def set_alpha_setting(key: str, value: str) -> None:
+    ensure_alpha_tables(); conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO alpha_settings(key,value) VALUES(?,?)", (key, value))
+    conn.commit(); conn.close()
+
+
+def get_alpha_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    ensure_alpha_tables(); conn = get_conn()
+    row = conn.execute("SELECT value FROM alpha_settings WHERE key=?", (key,)).fetchone()
+    conn.close(); return row[0] if row else default
+
+
+def save_wallet_score(score: Any) -> None:
+    ensure_alpha_tables(); conn = get_conn()
+    raw = json.dumps(getattr(score, "__dict__", {}), default=str)
+    conn.execute(
+        """INSERT OR REPLACE INTO wallet_scores(wallet,label,score,roi,pnl,volume,trades,winrate,open_value,consistency,recent_score,drawdown,last_scanned,raw_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (score.wallet, getattr(score, "label", ""), score.score, score.roi, score.pnl, score.volume, score.trades,
+         score.winrate, score.open_value, getattr(score, "consistency", 0), getattr(score, "recent_score", 0),
+         getattr(score, "drawdown", 0), now_iso(), raw),
+    )
+    conn.execute("UPDATE alpha_wallets SET score=?, updated_at=? WHERE wallet=?", (score.score, now_iso(), score.wallet))
+    conn.commit(); conn.close()
+
+
+def top_saved_wallet_scores(limit: int = 25) -> list[dict[str, Any]]:
+    ensure_alpha_tables(); conn = get_conn()
+    rows = conn.execute("SELECT wallet,label,score,roi,pnl,volume,trades,winrate,open_value,last_scanned FROM wallet_scores ORDER BY score DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    keys = ["wallet","label","score","roi","pnl","volume","trades","winrate","open_value","last_scanned"]
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def save_positions(wallet: str, positions: list[Any]) -> None:
+    ensure_alpha_tables(); conn = get_conn(); t = now_iso()
+    for p in positions:
+        conn.execute(
+            """INSERT INTO wallet_positions(wallet,market,title,outcome,size,value,avg_price,current_price,token_id,condition_id,first_seen,last_seen)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(wallet,market,outcome,token_id) DO UPDATE SET size=excluded.size,value=excluded.value,avg_price=excluded.avg_price,current_price=excluded.current_price,last_seen=excluded.last_seen""",
+            (wallet, p.market, p.title, p.outcome, p.size, p.value, p.avg_price, p.current_price, p.token_id, p.condition_id, t, t),
+        )
+    conn.commit(); conn.close()
+
+
+def save_consensus(signals: list[Any]) -> None:
+    ensure_alpha_tables(); conn = get_conn(); t = now_iso()
+    for s in signals:
+        conn.execute(
+            """INSERT INTO consensus_signals(market,title,outcome,score,wallets,total_value,avg_wallet_score,avg_price,fair_value,edge,confidence,best_wallets,token_id,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (s.market, s.title, s.outcome, s.score, s.wallets, s.total_value, s.avg_wallet_score, s.avg_price,
+             getattr(s, "fair_value", 0), getattr(s, "edge", 0), getattr(s, "confidence", ""), json.dumps(s.best_wallets), s.token_id, t),
+        )
+    conn.commit(); conn.close()
+
+
+def latest_consensus(limit: int = 20) -> list[dict[str, Any]]:
+    ensure_alpha_tables(); conn = get_conn()
+    rows = conn.execute("""SELECT market,title,outcome,score,wallets,total_value,avg_wallet_score,avg_price,fair_value,edge,confidence,created_at
+                         FROM consensus_signals ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
+    conn.close()
+    keys = ["market","title","outcome","score","wallets","total_value","avg_wallet_score","avg_price","fair_value","edge","confidence","created_at"]
+    return [dict(zip(keys, r)) for r in rows]
